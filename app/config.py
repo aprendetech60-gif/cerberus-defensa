@@ -38,14 +38,13 @@ class Settings:
     # ============================================
     # API KEYS - ✅ CORREGIDO
     # ============================================
-    # Soporta CERBERUS_API_KEY (única) y CERBERUS_API_KEYS (múltiples)
     CERBERUS_API_KEY = os.getenv("CERBERUS_API_KEY", "")
     CERBERUS_API_KEYS = [k.strip() for k in os.getenv("CERBERUS_API_KEYS", "").split(",") if k.strip()]
     CERBERUS_API_KEY_HEADER = os.getenv("CERBERUS_API_KEY_HEADER", "X-API-Key")
     CERBERUS_API_KEY_ROTATION_INTERVAL = int(os.getenv("CERBERUS_API_KEY_ROTATION_INTERVAL", "90"))
     
     # ============================================
-    # CORS - Seguro (sin wildcards en producción)
+    # CORS
     # ============================================
     CERBERUS_ALLOWED_ORIGINS = [o.strip() for o in os.getenv("CERBERUS_ALLOWED_ORIGINS", "").split(",") if o.strip()]
     CERBERUS_ALLOWED_METHODS = os.getenv("CERBERUS_ALLOWED_METHODS", "GET,POST,PUT,DELETE,OPTIONS").split(",")
@@ -68,14 +67,14 @@ class Settings:
     CERBERUS_RATE_LIMIT_DEFAULT_MAX = int(os.getenv("CERBERUS_RATE_LIMIT_DEFAULT_MAX", "100"))
     
     # ============================================
-    # REDIS (opcional)
+    # REDIS
     # ============================================
     CERBERUS_REDIS_URL = os.getenv("CERBERUS_REDIS_URL", "")
     CERBERUS_REDIS_PASSWORD = os.getenv("CERBERUS_REDIS_PASSWORD", "")
     CERBERUS_REDIS_DB = int(os.getenv("CERBERUS_REDIS_DB", "0"))
     
     # ============================================
-    # CLAVES CRIPTOGRÁFICAS (opcionales)
+    # CLAVES CRIPTOGRÁFICAS
     # ============================================
     CERBERUS_PRIVATE_KEY_B64 = os.getenv("CERBERUS_PRIVATE_KEY_B64", "")
     CERBERUS_PUBLIC_KEY_B64 = os.getenv("CERBERUS_PUBLIC_KEY_B64", "")

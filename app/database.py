@@ -17,6 +17,33 @@ Base = declarative_base()
 
 
 # ============================================================
+# NORMALIZADOR DE URL PARA ASYNC DRIVER
+# ============================================================
+
+def normalize_async_database_url(url: str) -> str:
+    """
+    Normaliza la URL de base de datos para usar asyncpg con SQLAlchemy async.
+    """
+    url = url.strip()
+    
+    # PostgreSQL con asyncpg
+    if url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    elif url.startswith("postgresql+psycopg2://"):
+        url = url.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
+    elif url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif url.startswith("postgresql+asyncpg://"):
+        # Ya está bien
+        pass
+    else:
+        # Si no es PostgreSQL, dejarla como está (SQLite)
+        pass
+    
+    return url
+
+
+# ============================================================
 # ENGINE
 # ============================================================
 
@@ -26,17 +53,17 @@ if database_url.startswith("sqlite"):
     engine = create_async_engine(
         database_url,
         echo=settings.CERBERUS_DEBUG,
-        connect_args={
-            "check_same_thread": False
-        },
+        connect_args={"check_same_thread": False},
     )
-
 else:
+    # ✅ Normalizar URL para usar asyncpg
+    async_database_url = normalize_async_database_url(database_url)
+    
     engine = create_async_engine(
-        database_url,
+        async_database_url,
         echo=settings.CERBERUS_DEBUG,
         pool_pre_ping=True,
-        pool_size=5,
+        pool_size=10,
         max_overflow=10,
     )
 
@@ -66,7 +93,7 @@ async def get_db():
 
 
 # ============================================================
-# DATABASE HEALTH - ✅ CORREGIDO
+# DATABASE HEALTH
 # ============================================================
 
 async def check_database_health() -> bool:
@@ -77,9 +104,6 @@ async def check_database_health() -> bool:
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(text("SELECT 1"))
-            val = result.scalar()
-            print(f"✅ DB Health Check: SELECT 1 = {val}")
-            return val == 1
-    except Exception as e:
-        print(f"❌ DB Health Check ERROR: {e}")
+            return result.scalar() == 1
+    except Exception:
         return False
