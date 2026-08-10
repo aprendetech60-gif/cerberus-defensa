@@ -66,7 +66,7 @@ async def get_db():
 
 
 # ============================================================
-# DATABASE HEALTH - ✅ CORREGIDO CON LOGGING
+# DATABASE HEALTH - ✅ CORREGIDO
 # ============================================================
 
 async def check_database_health() -> bool:
