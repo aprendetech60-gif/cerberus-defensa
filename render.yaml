@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: cerberus-v4
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: CERBERUS_ENV
+        value: production
+      - key: CERBERUS_DEBUG
+        value: false
+      - key: CERBERUS_DRY_RUN
+        value: false
+      - key: CERBERUS_FAIL_CLOSED
+        value: true
+      - key: CERBERUS_RATE_LIMIT_ENABLED
+        value: true
+      - key: CERBERUS_RATE_LIMIT_REQUESTS
+        value: 100
+      - key: CERBERUS_RATE_LIMIT_WINDOW
+        value: 60
+      - key: CERBERUS_API_KEYS
+        value: tu_api_key_aqui
+      - key: CERBERUS_ALLOWED_ORIGINS
+        value: 
+      - key: CERBERUS_DATABASE_URL
+        value: sqlite+aiosqlite:///./cerberus.db
