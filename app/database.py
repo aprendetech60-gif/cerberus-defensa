@@ -2,51 +2,81 @@
 CERBERUS V4 - Base de datos
 """
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
+
 from app.config import settings
 
-# ============================================
-# BASE PARA MODELOS SQLAlchemy
-# ============================================
+
+# ============================================================
+# BASE SQLALCHEMY
+# ============================================================
 
 Base = declarative_base()
 
-# ============================================
-# ENGINE
-# ============================================
 
-if settings.CERBERUS_DATABASE_URL.startswith("sqlite"):
+# ============================================================
+# ENGINE
+# ============================================================
+
+database_url = settings.CERBERUS_DATABASE_URL
+
+if database_url.startswith("sqlite"):
     engine = create_async_engine(
-        settings.CERBERUS_DATABASE_URL,
+        database_url,
         echo=settings.CERBERUS_DEBUG,
-        connect_args={"check_same_thread": False}
+        connect_args={
+            "check_same_thread": False
+        },
     )
+
 else:
     engine = create_async_engine(
-        settings.CERBERUS_DATABASE_URL,
+        database_url,
         echo=settings.CERBERUS_DEBUG,
+        pool_pre_ping=True,
         pool_size=5,
         max_overflow=10,
-        pool_pre_ping=True,
     )
 
-AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-# ============================================
-# DEPENDENCIAS
-# ============================================
+# ============================================================
+# SESSION FACTORY
+# ============================================================
+
+AsyncSessionLocal = sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+
+# ============================================================
+# DATABASE DEPENDENCY
+# ============================================================
 
 async def get_db():
-    """Obtener sesión de base de datos (dependencia FastAPI)"""
+    """Obtiene una sesión de base de datos."""
     async with AsyncSessionLocal() as session:
-        yield session
+        try:
+            yield session
+        finally:
+            await session.close()
+
+
+# ============================================================
+# DATABASE HEALTH
+# ============================================================
 
 async def check_database_health() -> bool:
-    """Verifica la salud de la base de datos"""
+    """
+    Comprueba que la base de datos esté disponible.
+    Compatible con SQLAlchemy 2.x.
+    """
     try:
         async with AsyncSessionLocal() as session:
-            await session.execute("SELECT 1")
-            return True
-    except Exception as e:
+            result = await session.execute(text("SELECT 1"))
+            return result.scalar() == 1
+    except Exception:
         return False
