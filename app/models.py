@@ -4,11 +4,13 @@ CERBERUS V4 - Modelos de datos
 
 from pydantic import BaseModel, Field, validator
 from sqlalchemy import Column, Integer, String, DateTime, JSON, Text, Index
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from enum import Enum
+
+# ✅ IMPORTAR EL BASE CENTRAL desde database.py
+from app.database import Base
 
 # ============================================
 # ENUMS
@@ -23,8 +25,6 @@ class DecisionStatus(str, Enum):
 # ============================================
 # MODELOS SQLALCHEMY
 # ============================================
-
-Base = declarative_base()
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
