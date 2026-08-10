@@ -1,114 +1,160 @@
 """
-CERBERUS V3.5 - API Principal (Versión Render)
-Simplificada para desplegar en Render sin dependencias complejas
+CERBERUS V4 - SISTEMA DE DEFENSA AUTÓNOMO
+Versión Endurecida para Producción en Render
+
+ARQUITECTURA:
+Authentication → Validation → Rate Limit → Detection → Risk → Policy → Enforcement → Audit
+
+CARACTERÍSTICAS:
+✅ API Key con rotación
+✅ IP real de conexión (con proxies confiables)
+✅ Rate limiting con Redis/PostgreSQL
+✅ Detección SQL mejorada
+✅ Risk Engine con correlación
+✅ Policy Engine (ALLOW/CHALLENGE/THROTTLE/DENY)
+✅ Enforcement con bloqueos temporales
+✅ Auditoría persistente
+✅ Health checks
+✅ Métricas
+✅ Fail-closed real
+✅ CORS seguro (sin wildcards en producción)
+✅ Manejo robusto de errores
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
 import uuid
-from datetime import datetime, timezone
-from typing import Dict, Optional
 import os
+import json
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Optional, List, Any
+import logging
 
 # ============================================
-# CONFIGURACIÓN SIMPLIFICADA
+# CONFIGURACIÓN DE LOGGING
 # ============================================
 
-class Settings:
-    """Configuración simplificada para Render"""
-    CERBERUS_ENV = os.getenv("CERBERUS_ENV", "production")
-    CERBERUS_DEBUG = os.getenv("CERBERUS_DEBUG", "false").lower() == "true"
-    CERBERUS_DRY_RUN = os.getenv("CERBERUS_DRY_RUN", "true").lower() == "true"
-    CERBERUS_FAIL_CLOSED = os.getenv("CERBERUS_FAIL_CLOSED", "true").lower() == "true"
-    CERBERUS_RATE_LIMIT_ENABLED = os.getenv("CERBERUS_RATE_LIMIT_ENABLED", "true").lower() == "true"
-    CERBERUS_AUDIT_RETENTION_DAYS = int(os.getenv("CERBERUS_AUDIT_RETENTION_DAYS", "365"))
-    CERBERUS_APPROVAL_TTL_SECONDS = int(os.getenv("CERBERUS_APPROVAL_TTL_SECONDS", "300"))
-    CERBERUS_API_HOST = os.getenv("CERBERUS_API_HOST", "0.0.0.0")
-    CERBERUS_API_PORT = int(os.getenv("CERBERUS_API_PORT", "8000"))
-    CERBERUS_API_WORKERS = int(os.getenv("CERBERUS_API_WORKERS", "1"))
-
-settings = Settings()
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("cerberus")
 
 # ============================================
-# DATOS EN MEMORIA (en lugar de base de datos)
+# IMPORTACIONES MODULARES
 # ============================================
 
-class Memoria:
-    """Almacenamiento en memoria para Render"""
-    ips_bloqueadas = set()
-    logs = []
-    aprobaciones = {}
-    ejecuciones = {}
-
-memoria = Memoria()
+from app.config import settings
+from app.models import (
+    DecisionRequest, DecisionResponse,
+    ClientSignals, DetectionResult, RiskResult,
+    PolicyResult, SecurityContext, DecisionStatus
+)
+from app.database import get_db, engine, Base, check_database_health
+from app.security.auth import validar_api_key, get_real_ip, extract_real_ip_middleware
+from app.detection.engine import DetectionEngine
+from app.risk.engine import RiskEngine
+from app.policy.engine import PolicyEngine
+from app.enforcement.engine import EnforcementEngine
+from app.audit.logger import AuditLogger
 
 # ============================================
-# FUNCIONES DE SEGURIDAD
+# LIFECYCLE
 # ============================================
 
-def detectar_ataque(peticion: Dict) -> Dict:
-    """Analiza si una petición es un ataque"""
-    ip = peticion.get("ip", "desconocida")
-    path = peticion.get("path", "/")
-    user_id = peticion.get("user_id", "anonimo")
-    body = peticion.get("body", {})
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Inicialización y limpieza de CERBERUS"""
     
-    riesgo = 0.0
+    try:
+        # Crear tablas en base de datos
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        
+        print("=" * 60)
+        print("🛡️ CERBERUS V4 - SISTEMA DE DEFENSA ENDURECIDO")
+        print("=" * 60)
+        print(f"📡 Entorno: {settings.CERBERUS_ENV}")
+        print(f"🔒 Dry Run: {settings.CERBERUS_DRY_RUN}")
+        print(f"🔒 Fail Closed: {settings.CERBERUS_FAIL_CLOSED}")
+        print(f"🗄️  Persistencia: PostgreSQL")
+        print(f"⚡ Rate Limiting: {settings.CERBERUS_RATE_LIMIT_ENABLED}")
+        print(f"🔄 API Key Rotation: {settings.CERBERUS_API_KEY_ROTATION_INTERVAL} días")
+        print(f"🌐 CORS Origins: {len(settings.CERBERUS_ALLOWED_ORIGINS)} dominios configurados")
+        print("=" * 60)
+        print("✅ CERBERUS LISTO PARA PROTEGER")
+        print("=" * 60)
+        
+    except Exception as e:
+        logger.error(f"❌ Error en inicialización: {e}")
+        raise
     
-    # 1. IP bloqueada
-    if ip in memoria.ips_bloqueadas:
-        return {
-            "ataque": True,
-            "razon": "IP_BLOQUEADA",
-            "riesgo": 1.0,
-            "accion": "BLOQUEAR"
-        }
+    yield
     
-    # 2. Rutas peligrosas
-    rutas_peligrosas = ["/admin", "/administrator", "/root", "/config", "/.env", "/.git"]
-    for ruta in rutas_peligrosas:
-        if ruta in path.lower():
-            riesgo += 0.3
-    
-    # 3. Inyección SQL
-    palabras_sql = ["SELECT", "DROP", "INSERT", "UPDATE", "DELETE", "UNION"]
-    body_str = str(body).upper()
-    for palabra in palabras_sql:
-        if palabra in body_str:
-            riesgo += 0.2
-    
-    # 4. Admin sin autenticación
-    if user_id == "admin" and not peticion.get("auth_token"):
-        riesgo += 0.4
-    
-    # Decidir
-    if riesgo >= 0.7:
-        return {"ataque": True, "razon": "RIESGO_ALTO", "riesgo": riesgo, "accion": "BLOQUEAR"}
-    elif riesgo >= 0.4:
-        return {"ataque": True, "razon": "RIESGO_MEDIO", "riesgo": riesgo, "accion": "ALERTAR"}
-    else:
-        return {"ataque": False, "razon": "SEGURO", "riesgo": riesgo, "accion": "PERMITIR"}
+    # Limpieza
+    try:
+        await engine.dispose()
+        print("🛑 CERBERUS V4 Detenido")
+    except Exception as e:
+        logger.error(f"❌ Error en limpieza: {e}")
 
 # ============================================
 # CREAR APP
 # ============================================
 
 app = FastAPI(
-    title="CERBERUS V3.5",
-    description="Sistema de Defensa Autónoma para Web y Backend",
-    version="3.5.0",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    title="CERBERUS V4",
+    description="Sistema de Defensa Autónomo - Versión Endurecida",
+    version="4.0.0",
+    lifespan=lifespan,
+    docs_url="/docs" if settings.CERBERUS_DEBUG else None,
+    redoc_url="/redoc" if settings.CERBERUS_DEBUG else None,
 )
 
 # ============================================
-# ENDPOINTS PRINCIPALES
+# CORS SEGURO (SIN WILDCARDS EN PRODUCCIÓN)
+# ============================================
+
+# Validación crítica: No permitir wildcards en producción
+if settings.CERBERUS_ENV == "production":
+    if "*" in settings.CERBERUS_ALLOWED_ORIGINS:
+        raise ValueError("❌ Wildcard CORS origin not allowed in production!")
+    if not settings.CERBERUS_ALLOWED_ORIGINS:
+        raise ValueError("❌ At least one CORS origin must be configured in production!")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CERBERUS_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=settings.CERBERUS_ALLOWED_METHODS,
+    allow_headers=settings.CERBERUS_ALLOWED_HEADERS,
+    expose_headers=["X-Execution-ID", "X-Risk-Score"],
+)
+
+# ============================================
+# MIDDLEWARE: IP REAL (usando request.state)
+# ============================================
+
+@app.middleware("http")
+async def extract_real_ip(request: Request, call_next):
+    """Extrae la IP real de la conexión y la almacena en request.state"""
+    await extract_real_ip_middleware(request, call_next)
+    return await call_next(request)
+
+# ============================================
+# INSTANCIAS DE MOTORES
+# ============================================
+
+detection_engine = DetectionEngine()
+risk_engine = RiskEngine()
+policy_engine = PolicyEngine()
+enforcement_engine = EnforcementEngine()
+audit_logger = AuditLogger()
+
+# ============================================
+# ENDPOINTS PÚBLICOS
 # ============================================
 
 @app.get("/")
@@ -116,183 +162,523 @@ async def root():
     """Estado de CERBERUS"""
     return {
         "name": "CERBERUS",
-        "version": "3.5.0",
+        "version": "4.0.0",
         "status": "active",
         "environment": settings.CERBERUS_ENV,
         "features": {
             "rate_limiting": settings.CERBERUS_RATE_LIMIT_ENABLED,
             "fail_closed": settings.CERBERUS_FAIL_CLOSED,
             "dry_run": settings.CERBERUS_DRY_RUN,
+            "persistence": "postgresql",
+            "api_key_rotation": settings.CERBERUS_API_KEY_ROTATION_INTERVAL,
         }
     }
 
 @app.get("/health")
-async def health():
-    """Health check para Render"""
+async def health(db=Depends(get_db)):
+    """Health check para Render - VERIFICA DEPENDENCIAS CRÍTICAS"""
+    
+    components = {
+        "api": "healthy",
+        "database": "unknown",
+        "rate_limiting": "unknown" if not settings.CERBERUS_RATE_LIMIT_ENABLED else "healthy",
+        "audit": "unknown"
+    }
+    
+    # Verificar base de datos
+    try:
+        db_healthy = await check_database_health()
+        components["database"] = "healthy" if db_healthy else "degraded"
+    except Exception as e:
+        logger.error(f"Health check DB error: {e}")
+        components["database"] = "unhealthy"
+    
+    # Verificar auditoría (escritura de prueba)
+    try:
+        test_execution_id = str(uuid.uuid4())
+        await audit_logger.log_event(
+            db=db,
+            execution_id=test_execution_id,
+            event_type="HEALTH_CHECK",
+            payload={"status": "test"},
+            ip="127.0.0.1",
+            path="/health",
+            method="GET"
+        )
+        components["audit"] = "healthy"
+    except Exception as e:
+        logger.error(f"Health check audit error: {e}")
+        components["audit"] = "degraded"
+    
+    # Determinar estado general
+    critical_components = ["database", "audit"]
+    unhealthy = [c for c in critical_components if components.get(c) == "unhealthy"]
+    degraded = [c for c in critical_components if components.get(c) == "degraded"]
+    
+    if unhealthy:
+        status = "unhealthy"
+    elif degraded:
+        status = "degraded"
+    else:
+        status = "healthy"
+    
     return {
-        "status": "healthy",
+        "status": status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "ips_bloqueadas": len(memoria.ips_bloqueadas),
-        "total_logs": len(memoria.logs)
+        "version": "4.0.0",
+        "components": components,
+        "details": {
+            "fail_closed": settings.CERBERUS_FAIL_CLOSED,
+            "dry_run": settings.CERBERUS_DRY_RUN,
+        }
     }
 
 # ============================================
 # ENDPOINT PRINCIPAL: DECISIÓN
 # ============================================
 
-@app.post("/v1/decide")
-async def decide(request: Dict):
+@app.post("/v1/decide", response_model=DecisionResponse)
+async def decide(
+    request: DecisionRequest,
+    api_key: str = Depends(validar_api_key),
+    real_ip: str = Depends(get_real_ip),  # ✅ Reutiliza request.state.real_ip
+    db=Depends(get_db)
+):
     """
     Toma una decisión de seguridad basada en la solicitud.
-    Tu web en Firebase llama a este endpoint.
+    
+    FLUJO:
+      1. ✅ Autenticación (API Key)
+      2. ✅ IP Real (no confiable del cliente)
+      3. ✅ Rate Limiting (por IP)
+      4. ✅ Normalización
+      5. ✅ Detección
+      6. ✅ Risk Engine
+      7. ✅ Policy Engine
+      8. ✅ Enforcement
+      9. ✅ Auditoría
     """
-    # Extraer datos
     execution_id = str(uuid.uuid4())
-    ip = request.get("ip", "desconocida")
-    path = request.get("path", "/")
-    user_id = request.get("user_id", "anonimo")
-    risk_score = float(request.get("risk_score", 0.0))
-    confidence = float(request.get("confidence", 0.0))
+    timestamp = datetime.now(timezone.utc)
     
-    # Analizar
-    resultado = detectar_ataque(request)
+    # ============================================
+    # 1. PREPARAR CONTEXTO
+    # ============================================
     
-    # Guardar log
-    log = {
-        "execution_id": execution_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "ip": ip,
-        "path": path,
-        "user_id": user_id,
-        "riesgo": resultado["riesgo"],
-        "accion": resultado["accion"],
-        "razon": resultado["razon"]
+    context = SecurityContext(
+        execution_id=execution_id,
+        timestamp=timestamp,
+        ip=real_ip,
+        path=request.path,
+        method=request.method,
+        user_id=request.user_id or "anonimo",
+        api_key=api_key,
+        dry_run=settings.CERBERUS_DRY_RUN,
+        fail_closed=settings.CERBERUS_FAIL_CLOSED,
+        client_signals=request.client_signals.model_dump() if request.client_signals else {},
+        body=request.body or {}
+    )
+    
+    try:
+        # ============================================
+        # 2. RATE LIMITING
+        # ============================================
+        
+        if settings.CERBERUS_RATE_LIMIT_ENABLED:
+            rate_limit_result = await enforcement_engine.check_rate_limit(
+                ip=real_ip,
+                path=request.path,
+                db=db
+            )
+            
+            if not rate_limit_result["allowed"]:
+                # Auditoría con manejo de errores
+                await _safe_audit_log(
+                    db=db,
+                    execution_id=execution_id,
+                    event_type="RATE_LIMIT_EXCEEDED",
+                    payload={
+                        "ip": real_ip,
+                        "path": request.path,
+                        "limit": rate_limit_result["limit"],
+                        "current": rate_limit_result["current"]
+                    }
+                )
+                
+                return DecisionResponse(
+                    status=DecisionStatus.THROTTLE,
+                    execution_id=execution_id,
+                    reason="RATE_LIMIT_EXCEEDED",
+                    message="⏳ Demasiadas peticiones, espera unos segundos",
+                    timestamp=timestamp.isoformat()
+                )
+        
+        # ============================================
+        # 3. DETECCIÓN
+        # ============================================
+        
+        detection_result = detection_engine.analyze(context)
+        
+        # ============================================
+        # 4. RISK ENGINE
+        # ============================================
+        
+        risk_result = risk_engine.calculate(
+            detection_result=detection_result,
+            context=context
+        )
+        
+        # ============================================
+        # 5. POLICY ENGINE
+        # ============================================
+        
+        policy_result = policy_engine.evaluate(
+            risk_result=risk_result,
+            context=context
+        )
+        
+        # ============================================
+        # 6. ENFORCEMENT
+        # ============================================
+        
+        enforcement_result = await enforcement_engine.enforce(
+            policy_result=policy_result,
+            context=context,
+            db=db
+        )
+        
+        # ============================================
+        # 7. AUDITORÍA (con manejo de errores)
+        # ============================================
+        
+        await _safe_audit_log(
+            db=db,
+            execution_id=execution_id,
+            event_type=f"DECISION_{policy_result.action}",
+            payload={
+                "ip": real_ip,
+                "path": request.path,
+                "method": request.method,
+                "user_id": request.user_id,
+                "risk_score": risk_result.score,
+                "risk_level": risk_result.level,
+                "action": policy_result.action,
+                "reason": policy_result.reason,
+                "evidencias": [e.get("type") for e in detection_result.evidences[:5]],
+                "enforcement": enforcement_result
+            },
+            ip=real_ip,
+            path=request.path,
+            method=request.method,
+            user_id=request.user_id,
+            risk_score=risk_result.score,
+            risk_level=risk_result.level,
+            action=policy_result.action
+        )
+        
+        # ============================================
+        # 8. RESPONDER
+        # ============================================
+        
+        if policy_result.action == "DENY":
+            return DecisionResponse(
+                status=DecisionStatus.DENIED,
+                execution_id=execution_id,
+                reason=policy_result.reason,
+                message="🚫 Acceso bloqueado por CERBERUS",
+                timestamp=timestamp.isoformat()
+            )
+        
+        elif policy_result.action == "CHALLENGE":
+            return DecisionResponse(
+                status=DecisionStatus.CHALLENGE,
+                execution_id=execution_id,
+                reason=policy_result.reason,
+                message="🔒 Se requiere verificación adicional",
+                timestamp=timestamp.isoformat()
+            )
+        
+        elif policy_result.action == "THROTTLE":
+            return DecisionResponse(
+                status=DecisionStatus.THROTTLE,
+                execution_id=execution_id,
+                reason=policy_result.reason,
+                message="⏳ Demasiadas peticiones",
+                timestamp=timestamp.isoformat()
+            )
+        
+        else:  # ALLOW
+            return DecisionResponse(
+                status=DecisionStatus.ALLOWED,
+                execution_id=execution_id,
+                message="✅ Petición segura",
+                timestamp=timestamp.isoformat()
+            )
+            
+    except Exception as e:
+        # ============================================
+        # FAIL-CLOSED: Si algo falla, DENY
+        # ============================================
+        
+        logger.error(f"❌ Error en decisión {execution_id}: {e}", exc_info=True)
+        
+        # Auditoría de error con protección contra fallos secundarios
+        try:
+            await _safe_audit_log(
+                db=db,
+                execution_id=execution_id,
+                event_type="DECISION_ERROR",
+                payload={
+                    "ip": real_ip,
+                    "path": request.path,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "fail_closed": settings.CERBERUS_FAIL_CLOSED
+                },
+                ip=real_ip,
+                path=request.path,
+                method=request.method
+            )
+        except Exception as audit_error:
+            logger.error(f"❌ Error en auditoría de fallo: {audit_error}")
+        
+        if settings.CERBERUS_FAIL_CLOSED:
+            return DecisionResponse(
+                status=DecisionStatus.DENIED,
+                execution_id=execution_id,
+                reason="INTERNAL_ERROR",
+                message="⚠️ Error de seguridad, intente más tarde",
+                timestamp=timestamp.isoformat()
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Sistema de seguridad no disponible"
+            )
+
+# ============================================
+# FUNCIÓN AUXILIAR: AUDITORÍA SEGURA
+# ============================================
+
+async def _safe_audit_log(db, execution_id: str, event_type: str, payload: dict, **kwargs):
+    """
+    Auditoría con manejo de errores para evitar fallos secundarios
+    """
+    try:
+        await audit_logger.log_event(
+            db=db,
+            execution_id=execution_id,
+            event_type=event_type,
+            payload=payload,
+            **kwargs
+        )
+    except Exception as e:
+        logger.error(f"❌ Error en auditoría {execution_id}: {e}")
+
+# ============================================
+# ENDPOINTS DE ADMINISTRACIÓN
+# ============================================
+
+@app.get("/v1/admin/status")
+async def admin_status(
+    api_key: str = Depends(validar_api_key),
+    db=Depends(get_db)
+):
+    """Estado del sistema (requiere API Key)"""
+    
+    # Obtener estadísticas de auditoría
+    try:
+        stats = await audit_logger.get_stats(db)
+    except Exception as e:
+        logger.error(f"Error obteniendo stats: {e}")
+        stats = {"error": str(e)}
+    
+    return {
+        "status": "active",
+        "version": "4.0.0",
+        "environment": settings.CERBERUS_ENV,
+        "features": {
+            "rate_limiting": settings.CERBERUS_RATE_LIMIT_ENABLED,
+            "fail_closed": settings.CERBERUS_FAIL_CLOSED,
+            "dry_run": settings.CERBERUS_DRY_RUN,
+            "api_key_rotation": settings.CERBERUS_API_KEY_ROTATION_INTERVAL,
+        },
+        "stats": stats,
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
-    memoria.logs.append(log)
-    
-    # Mantener solo últimos 1000 logs
-    if len(memoria.logs) > 1000:
-        memoria.logs = memoria.logs[-1000:]
-    
-    # Ejecutar acción
-    if resultado["accion"] == "BLOQUEAR":
-        memoria.ips_bloqueadas.add(ip)
+
+@app.get("/v1/admin/blocked-ips")
+async def admin_blocked_ips(
+    api_key: str = Depends(validar_api_key),
+    db=Depends(get_db)
+):
+    """Listar IPs bloqueadas (requiere API Key)"""
+    try:
+        blocked = await enforcement_engine.get_blocked_ips(db)
         return {
-            "status": "DENIED",
-            "execution_id": execution_id,
-            "reason": resultado["razon"],
-            "message": "🚫 Acceso bloqueado por CERBERUS",
-            "ip": ip,
+            "total": len(blocked),
+            "ips": blocked,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
-    
-    elif resultado["accion"] == "ALERTAR":
+    except Exception as e:
+        logger.error(f"Error obteniendo IPs bloqueadas: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error obteniendo IPs bloqueadas"
+        )
+
+@app.post("/v1/admin/block/{ip}")
+async def admin_block_ip(
+    ip: str,
+    duration_minutes: int = 30,
+    reason: str = "Bloqueo manual",
+    api_key: str = Depends(validar_api_key),
+    db=Depends(get_db)
+):
+    """Bloquear IP manualmente (requiere API Key)"""
+    try:
+        result = await enforcement_engine.block_ip(
+            ip=ip,
+            duration_minutes=duration_minutes,
+            reason=reason,
+            db=db
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Error bloqueando IP {ip}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error bloqueando IP: {str(e)}"
+        )
+
+@app.post("/v1/admin/unblock/{ip}")
+async def admin_unblock_ip(
+    ip: str,
+    api_key: str = Depends(validar_api_key),
+    db=Depends(get_db)
+):
+    """Desbloquear IP manualmente (requiere API Key)"""
+    try:
+        result = await enforcement_engine.unblock_ip(ip, db)
+        return result
+    except Exception as e:
+        logger.error(f"Error desbloqueando IP {ip}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error desbloqueando IP: {str(e)}"
+        )
+
+@app.get("/v1/admin/audit")
+async def admin_audit(
+    limit: int = 50,
+    event_type: Optional[str] = None,
+    api_key: str = Depends(validar_api_key),
+    db=Depends(get_db)
+):
+    """Ver logs de auditoría (requiere API Key)"""
+    try:
+        if limit > 1000:
+            limit = 1000
+        
+        logs = await audit_logger.get_events(
+            db=db,
+            limit=limit,
+            event_type=event_type
+        )
         return {
-            "status": "ALERT",
-            "execution_id": execution_id,
-            "reason": resultado["razon"],
-            "message": "⚠️ Comportamiento sospechoso detectado",
-            "ip": ip,
+            "total": len(logs),
+            "events": logs,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
+    except Exception as e:
+        logger.error(f"Error obteniendo auditoría: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error obteniendo logs de auditoría"
+        )
+
+# ============================================
+# MANEJADORES DE ERRORES
+# ============================================
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Manejo de errores HTTP con auditoría"""
     
+    if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": "🚫 No autorizado",
+                "message": exc.detail,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        )
+    
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "detail": exc.detail,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """Manejo de errores generales con fail-closed"""
+    
+    logger.error(f"❌ Error no manejado: {exc}", exc_info=True)
+    
+    if settings.CERBERUS_FAIL_CLOSED:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "error": "⚠️ Servicio no disponible",
+                "message": "Error interno de seguridad",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        )
     else:
-        return {
-            "status": "ALLOWED",
-            "execution_id": execution_id,
-            "message": "✅ Petición segura",
-            "ip": ip,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
+        # En modo no fail-closed, devolver error detallado
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "error": "Error interno del servidor",
+                "message": str(exc),
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        )
 
 # ============================================
-# ENDPOINTS DE SEGURIDAD
+# MIDDLEWARE: LOGGING DE PETICIONES
 # ============================================
 
-@app.get("/safety/estado")
-async def safety_estado():
-    """Estado de seguridad"""
-    return {
-        "estado": "activo",
-        "ips_bloqueadas": len(memoria.ips_bloqueadas),
-        "total_peticiones": len(memoria.logs)
-    }
-
-@app.get("/safety/ips-bloqueadas")
-async def safety_ips():
-    """Listar IPs bloqueadas"""
-    return {
-        "total": len(memoria.ips_bloqueadas),
-        "ips": list(memoria.ips_bloqueadas)
-    }
-
-@app.post("/safety/bloquear/{ip}")
-async def safety_bloquear(ip: str, razon: str = "Bloqueo manual"):
-    """Bloquear IP manualmente"""
-    memoria.ips_bloqueadas.add(ip)
-    return {
-        "mensaje": f"IP {ip} bloqueada",
-        "razon": razon
-    }
-
-@app.post("/safety/desbloquear/{ip}")
-async def safety_desbloquear(ip: str):
-    """Desbloquear IP manualmente"""
-    if ip in memoria.ips_bloqueadas:
-        memoria.ips_bloqueadas.remove(ip)
-        return {"mensaje": f"IP {ip} desbloqueada"}
-    return {"mensaje": f"IP {ip} no estaba bloqueada"}
-
-# ============================================
-# ENDPOINTS DE AUDITORÍA
-# ============================================
-
-@app.get("/auditoria/eventos")
-async def auditoria_eventos(limit: int = 50):
-    """Ver logs recientes"""
-    logs = memoria.logs[-limit:] if memoria.logs else []
-    return {
-        "total": len(memoria.logs),
-        "eventos": logs
-    }
-
-@app.get("/auditoria/estadisticas")
-async def auditoria_stats():
-    """Estadísticas de auditoría"""
-    total = len(memoria.logs)
-    bloqueados = len([l for l in memoria.logs if l.get("accion") == "BLOQUEAR"])
-    permitidos = len([l for l in memoria.logs if l.get("accion") == "PERMITIR"])
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Logging de peticiones para auditoría"""
     
-    return {
-        "total_eventos": total,
-        "bloqueados": bloqueados,
-        "permitidos": permitidos,
-        "ips_bloqueadas": len(memoria.ips_bloqueadas)
-    }
-
-# ============================================
-# ENDPOINT DE APROBACIÓN (simplificado)
-# ============================================
-
-@app.post("/v1/approve/{approval_id}")
-async def approve_action(approval_id: str, request: Dict):
-    """Aprueba una acción (simplificado)"""
-    return {
-        "status": "APPROVED",
-        "approval_id": approval_id,
-        "approved_by": request.get("approved_by", "unknown"),
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
-
-@app.post("/v1/deny/{approval_id}")
-async def deny_action(approval_id: str, request: Dict):
-    """Deniega una acción (simplificado)"""
-    return {
-        "status": "DENIED",
-        "approval_id": approval_id,
-        "reason": request.get("reason", "No reason provided"),
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
+    # Obtener IP real
+    real_ip = getattr(request.state, 'real_ip', 'unknown')
+    
+    # Log de petición
+    logger.info(f"📥 {request.method} {request.url.path} desde {real_ip}")
+    
+    start_time = datetime.now(timezone.utc)
+    
+    try:
+        response = await call_next(request)
+        
+        # Calcular duración
+        duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+        
+        # Log de respuesta
+        logger.info(f"📤 {request.method} {request.url.path} → {response.status_code} ({duration:.3f}s)")
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"❌ Error en {request.method} {request.url.path}: {e}")
+        raise
 
 # ============================================
 # INICIAR
@@ -300,18 +686,12 @@ async def deny_action(approval_id: str, request: Dict):
 
 if __name__ == "__main__":
     import uvicorn
-    print("=" * 60)
-    print("🛡️ CERBERUS V3.5 - SISTEMA DE DEFENSA")
-    print("=" * 60)
-    print(f"📡 Entorno: {settings.CERBERUS_ENV}")
-    print(f"🔒 Dry Run: {settings.CERBERUS_DRY_RUN}")
-    print("=" * 60)
-    print("✅ CERBERUS LISTO PARA PROTEGER")
-    print("=" * 60)
     
     uvicorn.run(
         "app.main:app",
         host=settings.CERBERUS_API_HOST,
         port=settings.CERBERUS_API_PORT,
         reload=settings.CERBERUS_DEBUG,
+        workers=settings.CERBERUS_API_WORKERS,
+        log_level="info" if not settings.CERBERUS_DEBUG else "debug",
     )
