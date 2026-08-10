@@ -66,7 +66,7 @@ async def get_db():
 
 
 # ============================================================
-# DATABASE HEALTH
+# DATABASE HEALTH - ✅ CORREGIDO CON LOGGING
 # ============================================================
 
 async def check_database_health() -> bool:
@@ -77,6 +77,9 @@ async def check_database_health() -> bool:
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(text("SELECT 1"))
-            return result.scalar() == 1
-    except Exception:
+            val = result.scalar()
+            print(f"✅ DB Health Check: SELECT 1 = {val}")
+            return val == 1
+    except Exception as e:
+        print(f"❌ DB Health Check ERROR: {e}")
         return False
