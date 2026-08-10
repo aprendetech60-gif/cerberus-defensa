@@ -17,7 +17,6 @@ def validar_api_key(
 ) -> str:
     """
     Valida la API Key usando comparación segura (hmac.compare_digest)
-    Soporta CERBERUS_API_KEY (única) y CERBERUS_API_KEYS (múltiples)
     """
     if not api_key:
         raise HTTPException(
@@ -25,17 +24,18 @@ def validar_api_key(
             detail="API Key requerida"
         )
     
-    # 1. Verificar CERBERUS_API_KEY (única)
-    if settings.CERBERUS_API_KEY and hmac.compare_digest(
-        api_key.strip(), 
-        settings.CERBERUS_API_KEY.strip()
-    ):
-        return api_key
+    # ✅ USAR CERBERUS_API_KEY (la que está en Render)
+    expected_key = settings.CERBERUS_API_KEY
     
-    # 2. Verificar CERBERUS_API_KEYS (múltiples)
-    for valid_key in settings.CERBERUS_API_KEYS:
-        if valid_key and hmac.compare_digest(api_key.strip(), valid_key.strip()):
-            return api_key
+    if not expected_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="API Key no configurada en el servidor"
+        )
+    
+    # Comparación segura
+    if hmac.compare_digest(api_key.strip(), expected_key.strip()):
+        return api_key
     
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -52,7 +52,6 @@ async def extract_real_ip_middleware(request: Request, call_next):
     """
     Middleware que extrae la IP real y la guarda en request.state
     """
-    # Checkear headers de proxy
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         request.state.real_ip = forwarded.split(",")[0].strip()
