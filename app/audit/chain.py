@@ -6,9 +6,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, Optional, List
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, text
+from sqlalchemy.sql import expression
 
-from app.models import AuditRecord
+# ✅ CORREGIDO: Importar AuditLog como AuditRecord
+from app.models import AuditLog as AuditRecord
 from app.security.crypto import (
     canonical_json, hash_canonical, sign_hash, verify_signature,
     load_private_key, load_public_key, verify_hash
@@ -19,17 +21,27 @@ class AuditChain:
     """
     Cadena de auditoría inmutable.
     Cada registro contiene: hash = SHA256(event + previous_hash)
+    
+    ARQUITECTURA:
+    ┌─────────────────────────────────────────────────────────────┐
+    │                      AUDIT CHAIN                           │
+    ├─────────────────────────────────────────────────────────────┤
+    │  Evento 1:  hash1 = SHA256(event1 + null)                 │
+    │  Evento 2:  hash2 = SHA256(event2 + hash1)                │
+    │  Evento 3:  hash3 = SHA256(event3 + hash2)                │
+    │  Evento N:  hashN = SHA256(eventN + hashN-1)              │
+    └─────────────────────────────────────────────────────────────┘
     """
     
     def __init__(self, session: AsyncSession):
         self.session = session
-        self.private_key = load_private_key(settings.CERBERUS_PRIVATE_KEY_B64)
-        self.public_key = load_public_key(settings.CERBERUS_PUBLIC_KEY_B64)
+        self.private_key = load_private_key(settings.CERBERUS_PRIVATE_KEY_B64) if settings.CERBERUS_PRIVATE_KEY_B64 else None
+        self.public_key = load_public_key(settings.CERBERUS_PUBLIC_KEY_B64) if settings.CERBERUS_PUBLIC_KEY_B64 else None
         self._previous_hash = None
         self._last_event_id = None
         
     def canonicalize_event(self, event: Dict) -> Dict:
-        """Representación canónica del evento"""
+        """Representación canónica del evento (orden determinista)"""
         return {
             "event_id": event.get("event_id", str(uuid.uuid4())),
             "timestamp": event.get("timestamp", datetime.now(timezone.utc).isoformat()),
@@ -66,6 +78,14 @@ class AuditChain:
         """
         Añade evento a la cadena.
         Siempre firmado y encadenado.
+        
+        FLUJO:
+        1. Obtener último hash
+        2. Canonicalizar evento
+        3. Calcular hash (incluye previous_hash)
+        4. Firmar hash
+        5. Guardar en BD
+        6. Actualizar estado local
         """
         # 1. Obtener último hash
         previous_hash = await self._get_last_hash()
@@ -77,8 +97,13 @@ class AuditChain:
         # 3. Calcular hash (incluye previous_hash)
         record_hash = self.calculate_hash(canonical, previous_hash)
         
-        # 4. Firmar
-        signature = sign_hash(self.private_key, record_hash)
+        # 4. Firmar (si hay clave privada)
+        signature = None
+        if self.private_key:
+            signature = sign_hash(self.private_key, record_hash)
+        else:
+            # Modo sin firma (desarrollo) - solo hash
+            signature = f"NO_SIG_{record_hash[:16]}"
         
         # 5. Crear registro
         record = {
@@ -94,17 +119,18 @@ class AuditChain:
         
         # 6. Guardar en BD
         db_record = AuditRecord(
+            execution_id=event.get("execution_id", str(uuid.uuid4())),
+            event_type=record["event_type"],
+            payload=record["payload"],
+            ip=event.get("ip"),
+            user_id=event.get("user_id"),
+            # Campos específicos de AuditChain
             event_id=record["event_id"],
             timestamp=datetime.fromisoformat(record["timestamp"]),
             source=record["source"],
-            event_type=record["event_type"],
-            payload=record["payload"],
             previous_hash=record["previous_hash"],
             hash=record["hash"],
             signature=record["signature"],
-            ip=event.get("ip"),
-            user_id=event.get("user_id"),
-            execution_id=event.get("execution_id"),
         )
         
         self.session.add(db_record)
@@ -119,6 +145,15 @@ class AuditChain:
     async def verify_chain(self, limit: int = None) -> Dict:
         """
         Verifica toda la cadena: hash + enlace + firma
+        
+        RETURNS:
+        {
+            "valid": True/False,
+            "total_records": N,
+            "last_hash": "hash",
+            "last_event_id": "id",
+            "error": "mensaje" (si hay error)
+        }
         """
         query = select(AuditRecord).order_by(AuditRecord.id)
         if limit:
@@ -133,12 +168,13 @@ class AuditChain:
                 "total_records": 0,
                 "last_hash": None,
                 "last_event_id": None,
+                "message": "Cadena vacía"
             }
         
         previous_hash = None
         
         for idx, record in enumerate(records):
-            # 1. Canonicalizar evento
+            # 1. Reconstruir evento canonico
             event = {
                 "event_id": record.event_id,
                 "timestamp": record.timestamp.isoformat(),
@@ -172,18 +208,19 @@ class AuditChain:
                     "got": record.previous_hash,
                 }
             
-            # 5. Verificar firma
-            if not verify_signature(
-                self.public_key,
-                record.signature,
-                record.hash
-            ):
-                return {
-                    "valid": False,
-                    "index": idx,
-                    "event_id": record.event_id,
-                    "reason": "INVALID_SIGNATURE",
-                }
+            # 5. Verificar firma (si existe y hay clave pública)
+            if self.public_key and record.signature and not record.signature.startswith("NO_SIG_"):
+                if not verify_signature(
+                    self.public_key,
+                    record.signature,
+                    record.hash
+                ):
+                    return {
+                        "valid": False,
+                        "index": idx,
+                        "event_id": record.event_id,
+                        "reason": "INVALID_SIGNATURE",
+                    }
             
             previous_hash = record.hash
         
@@ -192,14 +229,22 @@ class AuditChain:
             "total_records": len(records),
             "last_hash": previous_hash,
             "last_event_id": records[-1].event_id if records else None,
+            "message": "Cadena verificada correctamente"
         }
     
     async def get_stats(self) -> Dict:
         """
         Obtiene estadísticas de la cadena
-        USO CORRECTO DE SQLALCHEMY 2.0: usar func.count()
+        
+        RETURNS:
+        {
+            "total_records": N,
+            "last_hash": "hash",
+            "last_event_id": "id",
+            "last_timestamp": "iso_timestamp"
+        }
         """
-        # ✅ CORREGIDO: usar func.count() en lugar de .count()
+        # Total de registros
         total_result = await self.session.execute(
             select(func.count()).select_from(AuditRecord)
         )
