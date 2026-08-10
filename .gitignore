@@ -1,0 +1,41 @@
+# ============================================================
+# .gitignore - Archivos que NO subir a GitHub
+# ============================================================
+
+# Secretos
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.crt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+env/
+.venv/
+
+# Base de datos
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Docker
+.docker/
+docker-compose.yml
+
+# Claves generadas
+llaves_cerberus.txt
