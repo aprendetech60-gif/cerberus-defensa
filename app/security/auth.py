@@ -4,13 +4,20 @@ CERBERUS V4 - Autenticación
 
 import hmac
 import hashlib
-from fastapi import HTTPException, Request, Header, status
+from fastapi import HTTPException, Request, Header, status, Depends
+from fastapi.security import APIKeyHeader
 from typing import Optional
 from app.config import settings
 
-def validar_api_key(api_key: str = Header(..., alias="X-API-Key")):
+# Header para API Key
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def validar_api_key(
+    api_key: Optional[str] = Depends(api_key_header)
+) -> str:
     """
     Valida la API Key usando comparación segura (hmac.compare_digest)
+    Soporta CERBERUS_API_KEY (única) y CERBERUS_API_KEYS (múltiples)
     """
     if not api_key:
         raise HTTPException(
@@ -18,10 +25,16 @@ def validar_api_key(api_key: str = Header(..., alias="X-API-Key")):
             detail="API Key requerida"
         )
     
+    # 1. Verificar CERBERUS_API_KEY (única)
+    if settings.CERBERUS_API_KEY and hmac.compare_digest(
+        api_key.strip(), 
+        settings.CERBERUS_API_KEY.strip()
+    ):
+        return api_key
+    
+    # 2. Verificar CERBERUS_API_KEYS (múltiples)
     for valid_key in settings.CERBERUS_API_KEYS:
-        if not valid_key:
-            continue
-        if hmac.compare_digest(api_key, valid_key.strip()):
+        if valid_key and hmac.compare_digest(api_key.strip(), valid_key.strip()):
             return api_key
     
     raise HTTPException(
