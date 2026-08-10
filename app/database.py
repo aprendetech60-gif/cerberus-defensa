@@ -26,19 +26,12 @@ def normalize_async_database_url(url: str) -> str:
     """
     url = url.strip()
     
-    # PostgreSQL con asyncpg
     if url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
     elif url.startswith("postgresql+psycopg2://"):
         url = url.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
     elif url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql+asyncpg://", 1)
-    elif url.startswith("postgresql+asyncpg://"):
-        # Ya está bien
-        pass
-    else:
-        # Si no es PostgreSQL, dejarla como está (SQLite)
-        pass
     
     return url
 
@@ -56,7 +49,6 @@ if database_url.startswith("sqlite"):
         connect_args={"check_same_thread": False},
     )
 else:
-    # ✅ Normalizar URL para usar asyncpg
     async_database_url = normalize_async_database_url(database_url)
     
     engine = create_async_engine(
@@ -99,7 +91,6 @@ async def get_db():
 async def check_database_health() -> bool:
     """
     Comprueba que la base de datos esté disponible.
-    Compatible con SQLAlchemy 2.x.
     """
     try:
         async with AsyncSessionLocal() as session:

@@ -19,6 +19,12 @@ class Settings:
     CERBERUS_FAIL_CLOSED = os.getenv("CERBERUS_FAIL_CLOSED", "true").lower() == "true"
     
     # ============================================
+    # PROXIES CONFIABLES PARA IP REAL
+    # ============================================
+    CERBERUS_TRUST_PROXY_HEADERS = os.getenv("CERBERUS_TRUST_PROXY_HEADERS", "true").lower() == "true"
+    CERBERUS_TRUSTED_PROXIES = [p.strip() for p in os.getenv("CERBERUS_TRUSTED_PROXIES", "").split(",") if p.strip()]
+    
+    # ============================================
     # RATE LIMITING
     # ============================================
     CERBERUS_RATE_LIMIT_ENABLED = os.getenv("CERBERUS_RATE_LIMIT_ENABLED", "true").lower() == "true"
@@ -26,9 +32,8 @@ class Settings:
     CERBERUS_RATE_LIMIT_WINDOW = int(os.getenv("CERBERUS_RATE_LIMIT_WINDOW", "60"))
     
     # ============================================
-    # BASE DE DATOS - ✅ CORREGIDO
+    # BASE DE DATOS
     # ============================================
-    # Soporta CERBERUS_DATABASE_URL (local) y DATABASE_URL (Render)
     CERBERUS_DATABASE_URL = (
         os.getenv("CERBERUS_DATABASE_URL") or
         os.getenv("DATABASE_URL") or
@@ -36,7 +41,7 @@ class Settings:
     )
     
     # ============================================
-    # API KEYS - ✅ CORREGIDO
+    # API KEYS
     # ============================================
     CERBERUS_API_KEY = os.getenv("CERBERUS_API_KEY", "")
     CERBERUS_API_KEYS = [k.strip() for k in os.getenv("CERBERUS_API_KEYS", "").split(",") if k.strip()]

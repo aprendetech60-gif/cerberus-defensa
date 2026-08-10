@@ -4,24 +4,9 @@ Versión Endurecida para Producción en Render
 
 ARQUITECTURA:
 Authentication → Validation → Rate Limit → Detection → Risk → Policy → Enforcement → Audit
-
-CARACTERÍSTICAS:
-✅ API Key con rotación
-✅ IP real de conexión (con proxies confiables)
-✅ Rate limiting con Redis/PostgreSQL
-✅ Detección SQL mejorada
-✅ Risk Engine con correlación
-✅ Policy Engine (ALLOW/CHALLENGE/THROTTLE/DENY)
-✅ Enforcement con bloqueos temporales
-✅ Auditoría persistente
-✅ Health checks
-✅ Métricas
-✅ Fail-closed real
-✅ CORS seguro (sin wildcards en producción)
-✅ Manejo robusto de errores
 """
 
-from fastapi import FastAPI, Request, HTTPException, Depends, status
+from fastapi import FastAPI, Request, HTTPException, Depends, status, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
@@ -53,12 +38,72 @@ from app.models import (
     PolicyResult, SecurityContext, DecisionStatus
 )
 from app.database import get_db, engine, Base, check_database_health
-from app.security.auth import validar_api_key, get_real_ip
+from app.security.auth import validar_api_key, resolve_real_ip
 from app.detection.engine import DetectionEngine
 from app.risk.engine import RiskEngine
 from app.policy.engine import PolicyEngine
 from app.enforcement.engine import EnforcementEngine
 from app.audit.logger import AuditLogger
+
+# ============================================
+# FUNCIONES DE NORMALIZACIÓN - CONTRATO FUERTE
+# ============================================
+
+def _normalize_policy_result(policy_result: Any) -> PolicyResult:
+    """
+    Normaliza y valida el resultado del Policy Engine.
+
+    Contrato:
+        PolicyResult -> se devuelve directamente.
+        dict         -> se valida mediante Pydantic.
+        cualquier otro tipo -> error explícito.
+    """
+    if isinstance(policy_result, PolicyResult):
+        return policy_result
+
+    if isinstance(policy_result, dict):
+        try:
+            return PolicyResult.model_validate(policy_result)
+        except Exception as exc:
+            raise ValueError(
+                f"Policy Engine devolvió un resultado inválido: {exc}"
+            ) from exc
+
+    raise TypeError(
+        "Policy Engine devolvió un tipo no soportado: "
+        f"{type(policy_result).__name__}"
+    )
+
+
+def _get_policy_action(policy_result: PolicyResult) -> str:
+    """
+    Obtiene la acción de política como string canónico.
+    """
+    action = policy_result.action
+
+    if hasattr(action, "value"):
+        action = action.value
+
+    action = str(action).upper().strip()
+
+    allowed_actions = {
+        "ALLOW",
+        "CHALLENGE",
+        "THROTTLE",
+        "DENY",
+    }
+
+    if action not in allowed_actions:
+        raise ValueError(
+            f"Acción de política inválida: {action}"
+        )
+
+    return action
+
+
+def _resolve_real_ip(request: Request) -> str:
+    """Resuelve la IP real usando la política de proxies confiables."""
+    return resolve_real_ip(request)
 
 # ============================================
 # LIFECYCLE
@@ -135,22 +180,13 @@ app.add_middleware(
 )
 
 # ============================================
-# MIDDLEWARE: IP REAL (CORREGIDO - SIN ANIDAR)
+# MIDDLEWARE: IP REAL
 # ============================================
 
 @app.middleware("http")
 async def extract_real_ip(request: Request, call_next):
-    """Extrae la IP real de la conexión - VERSIÓN DIRECTA"""
-    # Obtener IP de headers
-    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-    if not ip:
-        ip = request.headers.get("X-Real-IP", "")
-    if not ip and request.client:
-        ip = request.client.host
-    if not ip:
-        ip = "unknown"
-    
-    request.state.real_ip = ip
+    """Extrae la IP real de la conexión usando política de proxies confiables."""
+    request.state.real_ip = _resolve_real_ip(request)
     response = await call_next(request)
     return response
 
@@ -185,63 +221,61 @@ async def root():
         }
     }
 
+@app.head("/")
+async def root_head():
+    """HEAD para / - evita 405"""
+    return Response(status_code=200)
+
 @app.get("/health")
-async def health(db=Depends(get_db)):
-    """Health check para Render - VERIFICA DEPENDENCIAS CRÍTICAS"""
-    
+async def health():
+    """
+    Health check operacional.
+
+    NO escribe auditoría.
+    NO ejecuta lógica de seguridad.
+    NO modifica estado.
+    """
     components = {
         "api": "healthy",
         "database": "unknown",
-        "rate_limiting": "unknown" if not settings.CERBERUS_RATE_LIMIT_ENABLED else "healthy",
-        "audit": "unknown"
+        "rate_limiting": "disabled",
+        "audit": "available",
     }
-    
-    # Verificar base de datos
+
+    # --------------------------------------------
+    # DATABASE
+    # --------------------------------------------
+
     try:
         db_healthy = await check_database_health()
-        components["database"] = "healthy" if db_healthy else "degraded"
-    except Exception as e:
-        logger.error(f"Health check DB error: {e}")
+        components["database"] = "healthy" if db_healthy else "unhealthy"
+    except Exception as exc:
+        logger.error(f"Health check DB error: {exc}")
         components["database"] = "unhealthy"
-    
-    # Verificar auditoría (escritura de prueba) - CAPTURAR ERROR SIN ROMPER
-    try:
-        test_execution_id = str(uuid.uuid4())
-        await audit_logger.log_event(
-            db=db,
-            execution_id=test_execution_id,
-            event_type="HEALTH_CHECK",
-            payload={"status": "test"},
-            ip="127.0.0.1",
-            path="/health",
-            method="GET"
-        )
-        components["audit"] = "healthy"
-    except Exception as e:
-        logger.warning(f"Health check audit warning: {e}")
-        components["audit"] = "degraded"
-    
-    # Determinar estado general
-    critical_components = ["database", "audit"]
-    unhealthy = [c for c in critical_components if components.get(c) == "unhealthy"]
-    degraded = [c for c in critical_components if components.get(c) == "degraded"]
-    
-    if unhealthy:
-        status = "unhealthy"
-    elif degraded:
-        status = "degraded"
-    else:
-        status = "healthy"
-    
+
+    # --------------------------------------------
+    # RATE LIMITING
+    # --------------------------------------------
+
+    if settings.CERBERUS_RATE_LIMIT_ENABLED:
+        components["rate_limiting"] = "healthy"
+
+    # --------------------------------------------
+    # ESTADO GENERAL
+    # --------------------------------------------
+
+    critical = [components["api"], components["database"]]
+    overall_status = "healthy" if "unhealthy" not in critical else "unhealthy"
+
     return {
-        "status": status,
+        "status": overall_status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "version": "4.0.0",
         "components": components,
         "details": {
             "fail_closed": settings.CERBERUS_FAIL_CLOSED,
             "dry_run": settings.CERBERUS_DRY_RUN,
-        }
+        },
     }
 
 # ============================================
@@ -250,9 +284,9 @@ async def health(db=Depends(get_db)):
 
 @app.post("/v1/decide", response_model=DecisionResponse)
 async def decide(
-    request: DecisionRequest,
+    request_data: DecisionRequest,
+    request: Request,
     api_key: str = Depends(validar_api_key),
-    real_ip: str = Depends(get_real_ip),
     db=Depends(get_db)
 ):
     """
@@ -260,18 +294,20 @@ async def decide(
     
     FLUJO:
       1. ✅ Autenticación (API Key)
-      2. ✅ IP Real (no confiable del cliente)
-      3. ✅ Rate Limiting (por IP)
-      4. ✅ Normalización
-      5. ✅ Detección
-      6. ✅ Risk Engine
-      7. ✅ Policy Engine
-      8. ✅ Enforcement
-      9. ✅ Auditoría
+      2. ✅ IP Real (con proxies confiables)
+      3. ✅ Rate Limiting
+      4. ✅ Detección
+      5. ✅ Risk Engine
+      6. ✅ Policy Engine
+      7. ✅ Enforcement
+      8. ✅ Auditoría
     """
     execution_id = str(uuid.uuid4())
     timestamp = datetime.now(timezone.utc)
-    
+
+    # IP real resuelta por el middleware
+    real_ip = getattr(request.state, "real_ip", "unknown")
+
     # ============================================
     # 1. PREPARAR CONTEXTO
     # ============================================
@@ -280,14 +316,14 @@ async def decide(
         execution_id=execution_id,
         timestamp=timestamp,
         ip=real_ip,
-        path=request.path,
-        method=request.method,
-        user_id=request.user_id or "anonimo",
+        path=request_data.path,
+        method=request_data.method,
+        user_id=request_data.user_id or "anonimo",
         api_key=api_key,
         dry_run=settings.CERBERUS_DRY_RUN,
         fail_closed=settings.CERBERUS_FAIL_CLOSED,
-        client_signals=request.client_signals.model_dump() if request.client_signals else {},
-        body=request.body or {}
+        client_signals=request_data.client_signals.model_dump() if request_data.client_signals else {},
+        body=request_data.body or {}
     )
     
     try:
@@ -298,7 +334,7 @@ async def decide(
         if settings.CERBERUS_RATE_LIMIT_ENABLED:
             rate_limit_result = await enforcement_engine.check_rate_limit(
                 ip=real_ip,
-                path=request.path,
+                path=request_data.path,
                 db=db
             )
             
@@ -309,10 +345,13 @@ async def decide(
                     event_type="RATE_LIMIT_EXCEEDED",
                     payload={
                         "ip": real_ip,
-                        "path": request.path,
+                        "path": request_data.path,
                         "limit": rate_limit_result["limit"],
                         "current": rate_limit_result["current"]
-                    }
+                    },
+                    ip=real_ip,
+                    path=request_data.path,
+                    method=request_data.method
                 )
                 
                 return DecisionResponse(
@@ -342,10 +381,16 @@ async def decide(
         # 5. POLICY ENGINE
         # ============================================
         
-        policy_result = policy_engine.evaluate(
+        raw_policy_result = policy_engine.evaluate(
             risk_result=risk_result,
             context=context
         )
+        
+        # ✅ Normalizar y validar resultado del Policy Engine
+        policy_result = _normalize_policy_result(raw_policy_result)
+        
+        # ✅ Obtener acción canónica
+        action = _get_policy_action(policy_result)
         
         # ============================================
         # 6. ENFORCEMENT
@@ -358,39 +403,42 @@ async def decide(
         )
         
         # ============================================
-        # 7. AUDITORÍA
+        # 7. AUDITORÍA - Evento de seguridad crítico
         # ============================================
         
-        await _safe_audit_log(
+        await _audit_security_event(
             db=db,
             execution_id=execution_id,
-            event_type=f"DECISION_{policy_result.action}",
+            event_type=f"DECISION_{action}",
             payload={
                 "ip": real_ip,
-                "path": request.path,
-                "method": request.method,
-                "user_id": request.user_id,
+                "path": request_data.path,
+                "method": request_data.method,
+                "user_id": request_data.user_id,
                 "risk_score": risk_result.score,
                 "risk_level": risk_result.level,
-                "action": policy_result.action,
+                "action": action,
                 "reason": policy_result.reason,
-                "evidencias": [e.get("type") for e in detection_result.evidences[:5]],
+                "evidencias": [
+                    e.get("type")
+                    for e in detection_result.evidences[:5]
+                ],
                 "enforcement": enforcement_result
             },
             ip=real_ip,
-            path=request.path,
-            method=request.method,
-            user_id=request.user_id,
+            path=request_data.path,
+            method=request_data.method,
+            user_id=request_data.user_id,
             risk_score=risk_result.score,
             risk_level=risk_result.level,
-            action=policy_result.action
+            action=action
         )
         
         # ============================================
         # 8. RESPONDER
         # ============================================
         
-        if policy_result.action == "DENY":
+        if action == "DENY":
             return DecisionResponse(
                 status=DecisionStatus.DENIED,
                 execution_id=execution_id,
@@ -399,7 +447,7 @@ async def decide(
                 timestamp=timestamp.isoformat()
             )
         
-        elif policy_result.action == "CHALLENGE":
+        elif action == "CHALLENGE":
             return DecisionResponse(
                 status=DecisionStatus.CHALLENGE,
                 execution_id=execution_id,
@@ -408,7 +456,7 @@ async def decide(
                 timestamp=timestamp.isoformat()
             )
         
-        elif policy_result.action == "THROTTLE":
+        elif action == "THROTTLE":
             return DecisionResponse(
                 status=DecisionStatus.THROTTLE,
                 execution_id=execution_id,
@@ -417,21 +465,25 @@ async def decide(
                 timestamp=timestamp.isoformat()
             )
         
-        else:  # ALLOW
+        elif action == "ALLOW":
             return DecisionResponse(
                 status=DecisionStatus.ALLOWED,
                 execution_id=execution_id,
                 message="✅ Petición segura",
                 timestamp=timestamp.isoformat()
             )
+        
+        else:
+            raise RuntimeError(f"Acción no contemplada: {action}")
             
-    except Exception as e:
+    except Exception as exc:
         # ============================================
-        # FAIL-CLOSED: Si algo falla, DENY
+        # FAIL-CLOSED: Si el motor falla, 503
         # ============================================
         
-        logger.error(f"❌ Error en decisión {execution_id}: {e}", exc_info=True)
+        logger.error(f"❌ Error en decisión {execution_id}: {exc}", exc_info=True)
         
+        # Auditoría del error
         try:
             await _safe_audit_log(
                 db=db,
@@ -439,39 +491,54 @@ async def decide(
                 event_type="DECISION_ERROR",
                 payload={
                     "ip": real_ip,
-                    "path": request.path,
-                    "error": str(e),
-                    "error_type": type(e).__name__,
+                    "path": request_data.path,
+                    "error_type": type(exc).__name__,
                     "fail_closed": settings.CERBERUS_FAIL_CLOSED
                 },
                 ip=real_ip,
-                path=request.path,
-                method=request.method
+                path=request_data.path,
+                method=request_data.method
             )
         except Exception as audit_error:
-            logger.error(f"❌ Error en auditoría de fallo: {audit_error}")
+            logger.error(f"❌ Error auditando fallo: {audit_error}")
         
         if settings.CERBERUS_FAIL_CLOSED:
-            return DecisionResponse(
-                status=DecisionStatus.DENIED,
-                execution_id=execution_id,
-                reason="INTERNAL_ERROR",
-                message="⚠️ Error de seguridad, intente más tarde",
-                timestamp=timestamp.isoformat()
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "status": "DENIED",
+                    "execution_id": execution_id,
+                    "reason": "SECURITY_ENGINE_ERROR",
+                    "message": "⚠️ CERBERUS no pudo completar la evaluación",
+                    "timestamp": timestamp.isoformat()
+                }
             )
         else:
             raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Sistema de seguridad no disponible"
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Error interno del motor de seguridad"
             )
 
 # ============================================
-# FUNCIÓN AUXILIAR: AUDITORÍA SEGURA
+# FUNCIONES AUXILIARES DE AUDITORÍA
 # ============================================
+
+async def _audit_security_event(db, execution_id: str, event_type: str, payload: dict, **kwargs):
+    """
+    Auditoría para eventos de seguridad críticos.
+    Si falla, propaga el error.
+    """
+    await audit_logger.log_event(
+        db=db,
+        execution_id=execution_id,
+        event_type=event_type,
+        payload=payload,
+        **kwargs
+    )
 
 async def _safe_audit_log(db, execution_id: str, event_type: str, payload: dict, **kwargs):
     """
-    Auditoría con manejo de errores para evitar fallos secundarios
+    Auditoría con manejo de errores para eventos no críticos.
     """
     try:
         await audit_logger.log_event(
@@ -481,8 +548,8 @@ async def _safe_audit_log(db, execution_id: str, event_type: str, payload: dict,
             payload=payload,
             **kwargs
         )
-    except Exception as e:
-        logger.error(f"❌ Error en auditoría {execution_id}: {e}")
+    except Exception as exc:
+        logger.error(f"❌ Error en auditoría {execution_id}: {exc}", exc_info=True)
 
 # ============================================
 # ENDPOINTS DE ADMINISTRACIÓN
@@ -499,7 +566,7 @@ async def admin_status(
         stats = await audit_logger.get_stats(db)
     except Exception as e:
         logger.error(f"Error obteniendo stats: {e}")
-        stats = {"error": str(e)}
+        stats = {"error": "Error obteniendo estadísticas"}
     
     return {
         "status": "active",
@@ -545,6 +612,9 @@ async def admin_block_ip(
 ):
     """Bloquear IP manualmente (requiere API Key)"""
     try:
+        if duration_minutes < 1 or duration_minutes > 10080:
+            raise ValueError("duration_minutes debe estar entre 1 y 10080 (7 días)")
+        
         result = await enforcement_engine.block_ip(
             ip=ip,
             duration_minutes=duration_minutes,
@@ -552,11 +622,13 @@ async def admin_block_ip(
             db=db
         )
         return result
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
-        logger.error(f"Error bloqueando IP {ip}: {e}")
+        logger.error(f"Error bloqueando IP {ip}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error bloqueando IP: {str(e)}"
+            detail="Error interno al bloquear IP"
         )
 
 @app.post("/v1/admin/unblock/{ip}")
@@ -570,10 +642,10 @@ async def admin_unblock_ip(
         result = await enforcement_engine.unblock_ip(ip, db)
         return result
     except Exception as e:
-        logger.error(f"Error desbloqueando IP {ip}: {e}")
+        logger.error(f"Error desbloqueando IP {ip}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error desbloqueando IP: {str(e)}"
+            detail="Error interno al desbloquear IP"
         )
 
 @app.get("/v1/admin/audit")
@@ -585,8 +657,8 @@ async def admin_audit(
 ):
     """Ver logs de auditoría (requiere API Key)"""
     try:
-        if limit > 1000:
-            limit = 1000
+        if limit < 1 or limit > 1000:
+            raise ValueError("limit debe estar entre 1 y 1000")
         
         logs = await audit_logger.get_events(
             db=db,
@@ -598,8 +670,10 @@ async def admin_audit(
             "events": logs,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
-        logger.error(f"Error obteniendo auditoría: {e}")
+        logger.error(f"Error obteniendo auditoría: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error obteniendo logs de auditoría"
@@ -651,13 +725,12 @@ async def general_exception_handler(request: Request, exc: Exception):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
                 "error": "Error interno del servidor",
-                "message": str(exc),
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
         )
 
 # ============================================
-# MIDDLEWARE: LOGGING DE PETICIONES (CORREGIDO)
+# MIDDLEWARE: LOGGING DE PETICIONES
 # ============================================
 
 @app.middleware("http")

@@ -3,7 +3,7 @@ CERBERUS V4 - Modelos de datos
 """
 
 from pydantic import BaseModel, Field, validator
-from sqlalchemy import Column, Integer, String, DateTime, JSON, Text, Index
+from sqlalchemy import Column, Integer, String, DateTime, JSON, Text, Index, Float
 from sqlalchemy.sql import func
 from typing import Optional, Dict, Any, List
 from datetime import datetime
@@ -22,6 +22,13 @@ class DecisionStatus(str, Enum):
     CHALLENGE = "CHALLENGE"
     THROTTLE = "THROTTLE"
 
+class RiskLevel(str, Enum):
+    NONE = "NONE"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+
 # ============================================
 # MODELOS SQLALCHEMY
 # ============================================
@@ -38,7 +45,7 @@ class AuditLog(Base):
     path = Column(String(255))
     method = Column(String(10))
     user_id = Column(String(100))
-    risk_score = Column(String(20))
+    risk_score = Column(Float)  # ✅ CORREGIDO: String → Float
     risk_level = Column(String(20))
     action = Column(String(20))
     
@@ -78,7 +85,7 @@ class RateLimit(Base):
     )
 
 # ============================================
-# MODELOS PYDANTIC
+# MODELOS PYDANTIC - CONTRATO FUERTE
 # ============================================
 
 class ClientSignals(BaseModel):
@@ -101,8 +108,12 @@ class DecisionRequest(BaseModel):
     
     @validator('path')
     def validar_path(cls, v):
+        if not v or not v.startswith('/'):
+            raise ValueError('Path debe comenzar con /')
         if len(v) > 255:
             raise ValueError('Path demasiado largo')
+        if '../' in v or '..\\' in v:
+            raise ValueError('Path traversal no permitido')
         return v
 
 class DecisionResponse(BaseModel):
@@ -111,6 +122,8 @@ class DecisionResponse(BaseModel):
     reason: Optional[str] = None
     message: str
     timestamp: str
+    ip: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
 
 class SecurityContext(BaseModel):
     execution_id: str
@@ -129,22 +142,55 @@ class SecurityContext(BaseModel):
         arbitrary_types_allowed = True
 
 class DetectionResult(BaseModel):
-    evidences: List[Dict[str, Any]]
-    sql_risk: float
-    path_risk: float
-    total_risk: float
-    is_suspicious: bool
+    evidences: List[Dict[str, Any]] = Field(default_factory=list)
+    sql_risk: float = 0.0
+    path_risk: float = 0.0
+    total_risk: float = 0.0
+    is_suspicious: bool = False
+    
+    @property
+    def threats(self) -> List[str]:
+        """Compatibilidad con versión anterior"""
+        return [e.get('type', 'unknown') for e in self.evidences if e.get('type')]
 
 class RiskResult(BaseModel):
-    score: float
-    level: str
-    confidence: float
-    factors: Dict[str, float]
+    score: float = Field(ge=0.0, le=1.0)
+    level: str = "NONE"
+    confidence: float = Field(ge=0.0, le=1.0)
+    factors: Dict[str, float] = Field(default_factory=dict)
+    recommendations: List[str] = Field(default_factory=list)
+    
+    @validator('level')
+    def validar_nivel(cls, v, values):
+        if 'score' in values:
+            score = values['score']
+            if score < 0.2:
+                return "NONE"
+            elif score < 0.4:
+                return "LOW"
+            elif score < 0.6:
+                return "MEDIUM"
+            elif score < 0.8:
+                return "HIGH"
+            else:
+                return "CRITICAL"
+        return v
 
 class PolicyResult(BaseModel):
     action: str
     reason: str
-    risk_score: float
-    risk_level: str
-    dry_run: bool
-    evidencias: List[str]
+    risk_score: float = 0.0
+    risk_level: str = "NONE"
+    dry_run: bool = False
+    evidencias: List[str] = Field(default_factory=list)
+    policy_rules: List[str] = Field(default_factory=list)
+    recommended_actions: List[str] = Field(default_factory=list)
+    requires_manual_review: bool = False
+    severity: str = "LOW"
+    
+    @validator('action')
+    def validar_action(cls, v):
+        allowed = ["ALLOW", "DENY", "CHALLENGE", "THROTTLE"]
+        if v.upper() not in allowed:
+            raise ValueError(f"Action must be one of {allowed}")
+        return v.upper()
