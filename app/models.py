@@ -94,7 +94,7 @@ class ClientSignals(BaseModel):
 
 class DecisionRequest(BaseModel):
     path: str = Field(..., max_length=255)
-    method: str = Field(..., regex="^(GET|POST|PUT|DELETE|PATCH)$")
+    method: str = Field(..., pattern="^(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)$")
     user_id: Optional[str] = Field(None, max_length=100)
     body: Optional[Dict[str, Any]] = None
     client_signals: Optional[ClientSignals] = None
