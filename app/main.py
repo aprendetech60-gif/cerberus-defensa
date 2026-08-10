@@ -135,29 +135,22 @@ app.add_middleware(
 )
 
 # ============================================
-# MIDDLEWARE: IP REAL (CORREGIDO - SIN MIDDLEWARE ANIDADO)
+# MIDDLEWARE: IP REAL (CORREGIDO - SIN ANIDAR)
 # ============================================
 
 @app.middleware("http")
 async def extract_real_ip(request: Request, call_next):
-    """Extrae la IP real de la conexión - VERSIÓN DIRECTA SIN ANIDAR"""
-    # Obtener IP de los headers
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        ip = forwarded.split(",")[0].strip()
-    else:
-        ip = request.headers.get("X-Real-IP")
-    
+    """Extrae la IP real de la conexión - VERSIÓN DIRECTA"""
+    # Obtener IP de headers
+    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    if not ip:
+        ip = request.headers.get("X-Real-IP", "")
     if not ip and request.client:
         ip = request.client.host
-    
     if not ip:
         ip = "unknown"
     
-    # Guardar en request.state
     request.state.real_ip = ip
-    
-    # Continuar con la siguiente capa
     response = await call_next(request)
     return response
 
