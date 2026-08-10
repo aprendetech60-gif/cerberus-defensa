@@ -53,7 +53,7 @@ from app.models import (
     PolicyResult, SecurityContext, DecisionStatus
 )
 from app.database import get_db, engine, Base, check_database_health
-from app.security.auth import validar_api_key, get_real_ip, extract_real_ip_middleware
+from app.security.auth import validar_api_key, get_real_ip
 from app.detection.engine import DetectionEngine
 from app.risk.engine import RiskEngine
 from app.policy.engine import PolicyEngine
@@ -72,6 +72,7 @@ async def lifespan(app: FastAPI):
         # Crear tablas en base de datos
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        logger.info("✅ Tablas de base de datos creadas/verificadas")
         
         print("=" * 60)
         print("🛡️ CERBERUS V4 - SISTEMA DE DEFENSA ENDURECIDO")
@@ -134,14 +135,31 @@ app.add_middleware(
 )
 
 # ============================================
-# MIDDLEWARE: IP REAL (usando request.state)
+# MIDDLEWARE: IP REAL (CORREGIDO - SIN MIDDLEWARE ANIDADO)
 # ============================================
 
 @app.middleware("http")
 async def extract_real_ip(request: Request, call_next):
-    """Extrae la IP real de la conexión y la almacena en request.state"""
-    await extract_real_ip_middleware(request, call_next)
-    return await call_next(request)
+    """Extrae la IP real de la conexión - VERSIÓN DIRECTA SIN ANIDAR"""
+    # Obtener IP de los headers
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        ip = forwarded.split(",")[0].strip()
+    else:
+        ip = request.headers.get("X-Real-IP")
+    
+    if not ip and request.client:
+        ip = request.client.host
+    
+    if not ip:
+        ip = "unknown"
+    
+    # Guardar en request.state
+    request.state.real_ip = ip
+    
+    # Continuar con la siguiente capa
+    response = await call_next(request)
+    return response
 
 # ============================================
 # INSTANCIAS DE MOTORES
@@ -193,7 +211,7 @@ async def health(db=Depends(get_db)):
         logger.error(f"Health check DB error: {e}")
         components["database"] = "unhealthy"
     
-    # Verificar auditoría (escritura de prueba)
+    # Verificar auditoría (escritura de prueba) - CAPTURAR ERROR SIN ROMPER
     try:
         test_execution_id = str(uuid.uuid4())
         await audit_logger.log_event(
@@ -207,7 +225,7 @@ async def health(db=Depends(get_db)):
         )
         components["audit"] = "healthy"
     except Exception as e:
-        logger.error(f"Health check audit error: {e}")
+        logger.warning(f"Health check audit warning: {e}")
         components["audit"] = "degraded"
     
     # Determinar estado general
@@ -241,7 +259,7 @@ async def health(db=Depends(get_db)):
 async def decide(
     request: DecisionRequest,
     api_key: str = Depends(validar_api_key),
-    real_ip: str = Depends(get_real_ip),  # ✅ Reutiliza request.state.real_ip
+    real_ip: str = Depends(get_real_ip),
     db=Depends(get_db)
 ):
     """
@@ -292,7 +310,6 @@ async def decide(
             )
             
             if not rate_limit_result["allowed"]:
-                # Auditoría con manejo de errores
                 await _safe_audit_log(
                     db=db,
                     execution_id=execution_id,
@@ -348,7 +365,7 @@ async def decide(
         )
         
         # ============================================
-        # 7. AUDITORÍA (con manejo de errores)
+        # 7. AUDITORÍA
         # ============================================
         
         await _safe_audit_log(
@@ -422,7 +439,6 @@ async def decide(
         
         logger.error(f"❌ Error en decisión {execution_id}: {e}", exc_info=True)
         
-        # Auditoría de error con protección contra fallos secundarios
         try:
             await _safe_audit_log(
                 db=db,
@@ -486,7 +502,6 @@ async def admin_status(
 ):
     """Estado del sistema (requiere API Key)"""
     
-    # Obtener estadísticas de auditoría
     try:
         stats = await audit_logger.get_stats(db)
     except Exception as e:
@@ -639,7 +654,6 @@ async def general_exception_handler(request: Request, exc: Exception):
             }
         )
     else:
-        # En modo no fail-closed, devolver error detallado
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
@@ -650,32 +664,23 @@ async def general_exception_handler(request: Request, exc: Exception):
         )
 
 # ============================================
-# MIDDLEWARE: LOGGING DE PETICIONES
+# MIDDLEWARE: LOGGING DE PETICIONES (CORREGIDO)
 # ============================================
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     """Logging de peticiones para auditoría"""
     
-    # Obtener IP real
     real_ip = getattr(request.state, 'real_ip', 'unknown')
-    
-    # Log de petición
     logger.info(f"📥 {request.method} {request.url.path} desde {real_ip}")
     
     start_time = datetime.now(timezone.utc)
     
     try:
         response = await call_next(request)
-        
-        # Calcular duración
         duration = (datetime.now(timezone.utc) - start_time).total_seconds()
-        
-        # Log de respuesta
         logger.info(f"📤 {request.method} {request.url.path} → {response.status_code} ({duration:.3f}s)")
-        
         return response
-        
     except Exception as e:
         logger.error(f"❌ Error en {request.method} {request.url.path}: {e}")
         raise
