@@ -34,7 +34,7 @@ from app.models import (
     PolicyResult, SecurityContext, DecisionStatus
 )
 from app.database import get_db, engine, Base, check_database_health
-from app.security.auth import validar_api_key, get_real_ip
+from app.security.auth import validar_api_key  # ✅ CORREGIDO: eliminado get_real_ip
 from app.detection.engine import DetectionEngine
 from app.risk.engine import RiskEngine
 from app.policy.engine import PolicyEngine
