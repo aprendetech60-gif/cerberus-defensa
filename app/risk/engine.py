@@ -3,7 +3,7 @@ CERBERUS V4 - Risk Engine
 """
 
 from typing import Dict, Any
-from app.models import DetectionResult, RiskResult
+from app.models import DetectionResult, RiskResult, SecurityContext
 
 class RiskEngine:
     """Motor de cálculo de riesgo."""
@@ -11,12 +11,12 @@ class RiskEngine:
     def calculate(
         self,
         detection_result: DetectionResult,
-        context: Dict[str, Any]
+        context: SecurityContext
     ) -> RiskResult:
         """Calcula el riesgo basado en detecciones."""
         score = detection_result.total_risk
         
-        # Factores adicionales
+        # Factores adicionales desde el contexto
         factors = {
             "sql_risk": detection_result.sql_risk,
             "path_risk": detection_result.path_risk,
