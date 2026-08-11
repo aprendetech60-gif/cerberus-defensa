@@ -19,9 +19,9 @@ class Settings:
     CERBERUS_FAIL_CLOSED = os.getenv("CERBERUS_FAIL_CLOSED", "true").lower() == "true"
     
     # ============================================
-    # PROXIES CONFIABLES PARA IP REAL
+    # PROXIES CONFIABLES
     # ============================================
-    CERBERUS_TRUST_PROXY_HEADERS = os.getenv("CERBERUS_TRUST_PROXY_HEADERS", "true").lower() == "true"
+    CERBERUS_TRUST_PROXY_HEADERS = os.getenv("CERBERUS_TRUST_PROXY_HEADERS", "false").lower() == "true"
     CERBERUS_TRUSTED_PROXIES = [p.strip() for p in os.getenv("CERBERUS_TRUSTED_PROXIES", "").split(",") if p.strip()]
     
     # ============================================
@@ -61,15 +61,12 @@ class Settings:
     CERBERUS_API_HOST = os.getenv("CERBERUS_API_HOST", "0.0.0.0")
     CERBERUS_API_PORT = int(os.getenv("CERBERUS_API_PORT", "8000"))
     CERBERUS_API_WORKERS = int(os.getenv("CERBERUS_API_WORKERS", "4"))
-    CERBERUS_API_TIMEOUT = int(os.getenv("CERBERUS_API_TIMEOUT", "30"))
     
     # ============================================
     # ENFORCEMENT
     # ============================================
     CERBERUS_BLOCK_DEFAULT_DURATION = int(os.getenv("CERBERUS_BLOCK_DEFAULT_DURATION", "30"))
     CERBERUS_RATE_LIMIT_BLOCK_DURATION = int(os.getenv("CERBERUS_RATE_LIMIT_BLOCK_DURATION", "300"))
-    CERBERUS_RATE_LIMIT_DEFAULT_WINDOW = int(os.getenv("CERBERUS_RATE_LIMIT_DEFAULT_WINDOW", "60"))
-    CERBERUS_RATE_LIMIT_DEFAULT_MAX = int(os.getenv("CERBERUS_RATE_LIMIT_DEFAULT_MAX", "100"))
     
     # ============================================
     # REDIS
@@ -88,10 +85,5 @@ class Settings:
     # LOGGING
     # ============================================
     CERBERUS_LOG_LEVEL = os.getenv("CERBERUS_LOG_LEVEL", "INFO")
-    
-    # ============================================
-    # HEALTH CHECK
-    # ============================================
-    CERBERUS_HEALTH_CHECK_PATH = os.getenv("CERBERUS_HEALTH_CHECK_PATH", "/health")
 
 settings = Settings()
